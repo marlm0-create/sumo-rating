@@ -85,9 +85,10 @@ def get_rating_data():
     direct_h2h = {}
     latest_name_map = {}
     latest_status = {}
+    kakuzuke_map_dict = {1: '幕内', 2: '十両', 3: '幕下', 4: '三段目', 5: '序二段', 6: '序ノ口'}
     
     latest_basho_id = df['basho_id'].max()
-    active_sekitori = set() 
+    active_rikishi = set() 
 
     basho_groups = df.groupby(['year', 'month', 'basho_id'], sort=False)
 
@@ -123,12 +124,12 @@ def get_rating_data():
                 basho_rank_nums[e_id] = e_rank_num
                 basho_rank_nums[w_id] = w_rank_num
 
-                latest_status[row['east_name']] = {'rank_num': e_rank_num}
-                latest_status[row['west_name']] = {'rank_num': w_rank_num}
+                latest_status[row['east_name']] = {'rank_num': e_rank_num, 'kakuzuke': kakuzuke_map_dict.get(kakuzuke, "不明")}
+                latest_status[row['west_name']] = {'rank_num': w_rank_num, 'kakuzuke': kakuzuke_map_dict.get(kakuzuke, "不明")}
 
-                if basho_id == latest_basho_id and kakuzuke in [1, 2]:
-                    active_sekitori.add(e_id)
-                    active_sekitori.add(w_id)
+                if basho_id == latest_basho_id:
+                    active_rikishi.add(e_id)
+                    active_rikishi.add(w_id)
 
                 basho_active_rikishi.add(e_id)
                 basho_active_rikishi.add(w_id)
@@ -252,7 +253,7 @@ def get_rating_data():
 
     ranking = []
     for r_id, player in rikishi_ratings.items():
-        if r_id in active_sekitori and player.getRd() < 100:
+        if r_id in active_rikishi and player.getRd() < 200: # 幕下以下も含むため制限緩和
             ranking.append({
                 'id': r_id,
                 'name': latest_name_map[r_id],

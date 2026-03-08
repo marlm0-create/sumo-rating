@@ -5,6 +5,7 @@ import glicko2
 import re
 from collections import deque
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 import joblib
 
 KIMARITE_CATEGORY = {
@@ -151,7 +152,7 @@ def build_and_train_model():
                 total_h2h = h2h_e + h2h_w
                 past_win_rate = h2h_e / total_h2h if total_h2h > 0 else 0.5
 
-                if is_played and kakuzuke in [1, 2]:
+                if is_played:
                     X.append([rating_diff, aff_diff, past_win_rate, rank_num_diff])
                     y.append(east_win)
 
@@ -194,9 +195,17 @@ def build_and_train_model():
 
     X = np.array(X)
     y = np.array(y)
-    model = LogisticRegression()
-    model.fit(X, y)
-    joblib.dump(model, 'sumo_model.pkl')
+    
+    # 総合モデル（ロジスティック回帰）
+    model_lr = LogisticRegression()
+    model_lr.fit(X, y)
+    joblib.dump(model_lr, 'sumo_model_lr.pkl')
+
+    # 正答率特化モデル（ランダムフォレスト）
+    model_rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    model_rf.fit(X, y)
+    joblib.dump(model_rf, 'sumo_model_rf.pkl')
+
     print("モデルの学習と保存が完了しました。")
 
 if __name__ == "__main__":

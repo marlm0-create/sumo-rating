@@ -4,6 +4,7 @@ import sqlite3
 import time
 import re
 import concurrent.futures
+import datetime
 
 def create_database():
     conn = sqlite3.connect('sumo_data.db')
@@ -36,10 +37,14 @@ def get_session():
     })
     return session
 
-def make_request_with_retry(session, url, payload, max_retries=5):
+def make_request_with_retry(session, url, payload=None, method='POST', max_retries=5):
     for attempt in range(max_retries):
         try:
-            response = session.post(url, data=payload, timeout=20)
+            if method == 'POST':
+                response = session.post(url, data=payload, timeout=20)
+            else:
+                response = session.get(url, timeout=20)
+                
             if response.status_code == 200:
                 return response
         except requests.exceptions.RequestException:
@@ -50,19 +55,26 @@ def make_request_with_retry(session, url, payload, max_retries=5):
 def get_basho_id(session, year, month):
     url = "https://www.sumo.or.jp/ResultRikishiDataDaicho/torikumi/"
     payload = {"year": str(year), "basho_month": f"{month:02d}", "contents": "torikumi"}
-    response = make_request_with_retry(session, url, payload)
+    response = make_request_with_retry(session, url, payload, method='POST')
     if not response: return None
     match = re.search(r'torikumi\(\d+,\s*\d+,\s*(\d+)\)', response.text)
     if match: return int(match.group(1))
     return None
 
 def fetch_day_data(args):
-    year, month, basho_id, day, kakuzuke = args
+    year, month, basho_id, day, kakuzuke, is_current = args
     session = get_session()
-    url = "https://www.sumo.or.jp/ResultRikishiDataDaicho/torikumi"
-    payload = {"basho_id": basho_id, "day": day, "kakuzuke": kakuzuke}
     
-    response = make_request_with_retry(session, url, payload)
+    # 開催中・開催前の最新場所は、リアルタイム速報ページからGETで取得
+    if is_current:
+        url = f"https://www.sumo.or.jp/ResultData/torikumi/{kakuzuke}/{day}/"
+        response = make_request_with_retry(session, url, method='GET')
+    # 過去の場所は成績データベースからPOSTで取得
+    else:
+        url = "https://www.sumo.or.jp/ResultRikishiDataDaicho/torikumi"
+        payload = {"basho_id": basho_id, "day": day, "kakuzuke": kakuzuke}
+        response = make_request_with_retry(session, url, payload, method='POST')
+        
     if not response: return []
 
     soup = BeautifulSoup(response.content, 'html.parser')
@@ -98,6 +110,7 @@ def fetch_day_data(args):
                     m = re.search(r'/profile/(\d+)', west_a['href'])
                     if m: west_id = int(m.group(1))
                 
+                # 決まり手が空欄の場合は、未来の取組と判定して "-" を入れる
                 if kimarite == "":
                     east_result = "-"
                     west_result = "-"
@@ -116,6 +129,7 @@ def main():
     conn = create_database()
     cursor = conn.cursor()
     
+    # 実行のたびに未取組データを一度消去し、最新の予定で上書きする
     cursor.execute("DELETE FROM bouts WHERE east_result = '-' OR east_result = ''")
     conn.commit()
     
@@ -124,6 +138,17 @@ def main():
     main_session = get_session()
     tasks = []
     
+    cursor.execute('SELECT MAX(basho_id) FROM bouts')
+    max_basho_id = cursor.fetchone()[0] or 0
+    
+    # 現在の年と、直近の奇数月（本場所の月）を算出
+    today = datetime.date.today()
+    target_year = today.year
+    target_month = today.month if today.month % 2 != 0 else today.month + 1
+    if target_month > 12:
+        target_month = 1
+        target_year += 1
+
     print("データベースをスキャンし、不足または未取組の日程を特定します...")
     for year in years:
         for month in months:
@@ -141,7 +166,18 @@ def main():
                 continue
                 
             basho_id = get_basho_id(main_session, year, month)
-            if not basho_id: continue
+            is_current = False
+            
+            # 過去の成績DBに見つからない場合
+            if not basho_id:
+                # それが今月・来月の場所なら、リアルタイム速報ページから取得するフラグを立てる
+                if year == target_year and month == target_month:
+                    cursor.execute('SELECT basho_id FROM bouts WHERE year = ? AND month = ? LIMIT 1', (year, month))
+                    row = cursor.fetchone()
+                    basho_id = row[0] if row else max_basho_id + 1
+                    is_current = True
+                else:
+                    continue
             
             missing_info = []
             for kakuzuke in range(1, 7):
@@ -149,10 +185,11 @@ def main():
                 if missing_days:
                     missing_info.append(f"階級{kakuzuke}({len(missing_days)}日)")
                     for day in missing_days:
-                        tasks.append((year, month, basho_id, day, kakuzuke))
+                        tasks.append((year, month, basho_id, day, kakuzuke, is_current))
             
             if missing_info:
-                print(f"  {year}年{month}月 (ID:{basho_id}): 取得対象 -> {', '.join(missing_info)}")
+                status_str = "最新場所" if is_current else "過去場所"
+                print(f"  {year}年{month}月 ({status_str} ID:{basho_id}): 取得対象 -> {', '.join(missing_info)}")
 
     if not tasks:
         print("すべてのデータが揃っています。更新対象はありません。")
@@ -160,6 +197,7 @@ def main():
         return
         
     print(f"\n合計 {len(tasks)} 件のタスクを実行します。")
+    # 最新場所のまだ発表されていない日程（3日目以降など）はデータが空になるのが正常です
     MAX_WORKERS = 5
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -173,7 +211,8 @@ def main():
                     conn.commit()
                     print(f"    - 取得完了: {task[0]}年{task[1]}月 階級{task[4]} {task[3]}日目")
                 else:
-                    print(f"    - データ空: {task[0]}年{task[1]}月 階級{task[4]} {task[3]}日目")
+                    if not task[5]: # 最新場所でないのに空なのはおかしい場合のみ表示
+                        print(f"    - データ空: {task[0]}年{task[1]}月 階級{task[4]} {task[3]}日目")
             except Exception as e:
                 print(f"    - エラー発生: {task} -> {e}")
                 
